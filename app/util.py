@@ -48,7 +48,7 @@ def getScreen():
 
         # Batasi minimal & maksimal
         if width < 60:
-            width = 60
+            width = 55
         elif width > 120:
             width = 60
 
