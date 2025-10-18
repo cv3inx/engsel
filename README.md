@@ -1,30 +1,42 @@
+# How to Run in TERMUX / LINUX
 
+1. **Update & Upgrade Termux**
 
-# How to run with TERMUX
-1. Update & Upgrade Termux
+```bash
+apt update && apt upgrade -y
+````
+
+2. **Install Git**
+
+```bash
+apt install git -y
 ```
-pkg update && pkg upgrade -y
+
+3. **Clone this repository**
+
+```bash
+git clone https://github.com/cv3inx/engsel
 ```
-2. Install Git
-```
-pkg install git -y
-```
-3. Clone this repo
-```
-git clone https://github.com/kejuashuejia/reedem
-```
-4. Open the folder
-```
+
+4. **Open the folder**
+
+```bash
 cd reedem
 ```
-5. Setup
-```
+
+5. **Setup**
+
+```bash
 bash setup.sh
 ```
-6. Run the script
-```
+
+6. **Run the script**
+
+```bash
 python main.py
 ```
+
+---
 
 ## Contact
 
