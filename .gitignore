@@ -16,3 +16,4 @@ sentry/
 active.number
 venv/
 apikey.anomali
+*.log
