@@ -1,3 +1,4 @@
+# existing
 Brotli==1.1.0
 certifi==2025.8.3
 charset-normalizer==3.4.3
@@ -9,3 +10,9 @@ qrcode==8.2
 ascii_magic==2.3.0
 python-dotenv==1.1.1
 colorama
+
+# tambahan modern CLI
+rich==13.9.4
+rich-argparse==1.6.0     # bikin help menu CLI auto-rich
+textual==0.71.0          # full TUI dashboard mode (selevel htop)
+halo==0.0.31             # loading/spinner animasi aesthetic

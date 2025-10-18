@@ -41,6 +41,23 @@ def save_api_key(api_key: str):
     # Reload the environment variables
     load_dotenv(override=True)
 
+def getScreen():
+    try:
+        terminal_size = os.get_terminal_size()
+        width = int(terminal_size.columns)  # 80% responsif
+
+        # Batasi minimal & maksimal
+        if width < 60:
+            width = 60
+        elif width > 120:
+            width = 60
+
+        return width
+
+    except OSError:
+        # Default kalau ga bisa baca size terminal
+        return 60
+
 def get_api_key():
     """Gets the API key from environment variables or prompts the user."""
     load_dotenv()
@@ -55,4 +72,5 @@ def get_api_key():
             exit(1)
     return api_key
 
-PACKAGES_URL = "https://pastebin.com/raw/vB9S1vu3"
+PACKAGES_URL = "https://raw.githubusercontent.com/cv3inx/pkg-engsel/refs/heads/main/famcode.json"
+NOTIF_URL = "https://raw.githubusercontent.com/cv3inx/pkg-engsel/refs/heads/main/notifikasi.json"

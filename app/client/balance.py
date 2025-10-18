@@ -4,9 +4,20 @@ import time
 import uuid
 
 import requests
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
+from rich.panel import Panel
+from rich.align import Align
+from rich.text import Text
+from rich.prompt import Prompt
+from rich.json import JSON
+
 from app.client.encrypt import API_KEY, build_encrypted_field, decrypt_xdata, encryptsign_xdata, get_x_signature_payment, java_like_timestamp
 from app.client.engsel import BASE_API_URL, UA, intercept_page, send_api_request
 from app.type_dict import PaymentItem
+
+console = Console()
 
 def settlement_balance(
     api_key: str,
@@ -20,36 +31,43 @@ def settlement_balance(
 ):
     # Sanity check
     if overwrite_amount == -1 and not ask_overwrite:
-        print("Either ask_overwrite must be True or overwrite_amount must be set.")
+        console.print("[red]Either ask_overwrite must be True or overwrite_amount must be set.[/red]")
         return None
 
     token_confirmation = items[token_confirmation_idx]["token_confirmation"]
-    payment_targets = ""
-    for item in items:
-        if payment_targets != "":
-            payment_targets += ";"
-        payment_targets += item["item_code"]
+    payment_targets = ";".join(item["item_code"] for item in items)
 
     amount_int = 0
     
     # Determine amount to use
     if overwrite_amount != -1:
         amount_int = overwrite_amount
-    elif amount_idx == -1:
+    elif amount_idx != -1 and amount_idx < len(items):
         amount_int = items[amount_idx]["item_price"]
+    else:
+        # Jika amount_idx -1, gunakan item terakhir
+        amount_int = items[-1]["item_price"]
 
     # If Overwrite
     if ask_overwrite:
-        print(f"Total amount is {amount_int}.\nEnter new amount if you need to overwrite.")
-        amount_str = input("Press enter to ignore & use default amount: ")
+        console.print(f"[yellow]Total amount is {amount_int}.[/yellow]")
+        amount_str = console.input("Enter new amount if you need to overwrite (Press enter to ignore & use default amount): ")
         if amount_str != "":
             try:
                 amount_int = int(amount_str)
             except ValueError:
-                print("Invalid overwrite input, using original price.")
+                console.print("[yellow]Invalid overwrite input, using original price.[/yellow]")
                 # return None
-    intercept_page(api_key, tokens, items[0]["item_code"], False)
-    
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("[cyan]Intercepting page...", total=None)
+        intercept_page(api_key, tokens, items[0]["item_code"], False)
+
     # Get payment methods
     payment_path = "payments/api/v8/payment-methods-option"
     payment_payload = {
@@ -61,11 +79,18 @@ def settlement_balance(
         "token_confirmation": token_confirmation
     }
     
-    print("Getting payment methods...")
-    payment_res = send_api_request(api_key, payment_path, payment_payload, tokens["id_token"], "POST")
-    if payment_res["status"] != "SUCCESS":
-        print("Failed to fetch payment methods.")
-        print(f"Error: {payment_res}")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("[cyan]Getting payment methods...", total=None)
+        payment_res = send_api_request(api_key, payment_path, payment_payload, tokens["id_token"], "POST")
+    
+    if payment_res.get("status") != "SUCCESS":
+        console.print("[red]Failed to fetch payment methods.[/red]")
+        console.print(f"[red]Error: {payment_res}[/red]")
         return payment_res
     
     token_payment = payment_res["data"]["token_payment"]
@@ -177,19 +202,32 @@ def settlement_balance(
     }
     
     url = f"{BASE_API_URL}/{path}"
-    print("Sending settlement request...")
-    resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=30)
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("[cyan]Sending settlement request...", total=None)
+        resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=30)
     
     try:
         decrypted_body = decrypt_xdata(api_key, json.loads(resp.text))
-        if decrypted_body["status"] != "SUCCESS":
-            print("Failed to initiate settlement.")
-            print(f"Error: {decrypted_body}")
-            return decrypted_body
-        
-        print(f"Purchase result:\n{json.dumps(decrypted_body, indent=2)}")
-        
+        table = Table(title="Purchase Result", expand=True, show_lines=False, header_style="bold cyan")
+        table.add_column("Name", style="bold white", no_wrap=True)
+        table.add_column("Value", style="green", overflow="fold")
+
+        for key, value in decrypted_body.items():
+            table.add_row(str(key).capitalize(), str(value))
+
+        console.print(Panel(table, border_style="green"))
+
+        console.print("\n[bold cyan]Raw JSON Response[/bold cyan]")
+        console.print(JSON.from_data(decrypted_body, indent=2))
         return decrypted_body
+
+        
     except Exception as e:
-        print("[decrypt err]", e)
+        console.print(f"[red][decrypt err] {e}[/red]")
         return resp.text

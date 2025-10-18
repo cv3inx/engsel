@@ -15,10 +15,10 @@ from app.menus.package import fetch_my_packages, get_packages_by_family
 from app.menus.hot import show_hot_menu, show_hot_menu2
 from app.service.sentry import enter_sentry_mode
 from app.menus.purchase import purchase_by_family
-from app.util import get_api_key
+from app.util import get_api_key, getScreen
 from app.service.util import fetch_api_key_from_remote, ensure_api_key
 
-WIDTH = 55
+WIDTH = getScreen()
 
 def show_main_menu(profile):
     clear_screen()

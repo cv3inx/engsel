@@ -2,8 +2,12 @@ import os
 import json
 import uuid
 import requests
-
 from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any, List
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.panel import Panel
+from rich.text import Text
 
 from app.client.encrypt import (
     encryptsign_xdata,
@@ -16,31 +20,90 @@ from app.client.encrypt import (
     ax_device_id
 )
 
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+console = Console()
+
 BASE_API_URL = os.getenv("BASE_API_URL")
 BASE_CIAM_URL = os.getenv("BASE_CIAM_URL")
+
 if not BASE_API_URL or not BASE_CIAM_URL:
     raise ValueError("BASE_API_URL or BASE_CIAM_URL environment variable not set")
 
-GET_OTP_URL = BASE_CIAM_URL + "/realms/xl-ciam/auth/otp"
+GET_OTP_URL = f"{BASE_CIAM_URL}/realms/xl-ciam/auth/otp"
+SUBMIT_OTP_URL = f"{BASE_CIAM_URL}/realms/xl-ciam/protocol/openid-connect/token"
+
 BASIC_AUTH = os.getenv("BASIC_AUTH")
+UA = os.getenv("UA")
 AX_DEVICE_ID = ax_device_id()
 AX_FP = load_ax_fp()
-SUBMIT_OTP_URL = BASE_CIAM_URL + "/realms/xl-ciam/protocol/openid-connect/token"
-UA = os.getenv("UA")
+
+# Device constants
+DEVICE_NAME = "samsung"
+DEVICE_MODEL = "SM-N935F"
+APP_VERSION = "8.8.0"
+SUBSTYPE = "PREPAID"
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
 
 def validate_contact(contact: str) -> bool:
+    """
+    Validate contact number format.
+    
+    Args:
+        contact: Phone number string
+        
+    Returns:
+        True if valid, False otherwise
+    """
     if not contact.startswith("628") or len(contact) > 14:
-        print("Invalid number")
+        console.print("[red]✗[/red] Invalid number format", style="bold")
         return False
     return True
 
-def get_otp(contact: str) -> str:
-    # Contact example: "6287896089467"
+
+def log_success(message: str) -> None:
+    """Log success message with green checkmark."""
+    console.print(f"[green]✓[/green] {message}", style="bold")
+
+
+def log_error(message: str) -> None:
+    """Log error message with red cross."""
+    console.print(f"[red]✗[/red] {message}", style="bold red")
+
+
+def log_info(message: str) -> None:
+    """Log info message with blue icon."""
+    console.print(f"[cyan]ℹ[/cyan] {message}", style="bold cyan")
+
+
+def log_warning(message: str) -> None:
+    """Log warning message with yellow icon."""
+    console.print(f"[yellow]⚠[/yellow] {message}", style="bold yellow")
+
+
+# ============================================================================
+# AUTHENTICATION FUNCTIONS
+# ============================================================================
+
+def get_otp(contact: str) -> Optional[str]:
+    """
+    Request OTP for the given contact number.
+    
+    Args:
+        contact: Phone number (e.g., "6287896089467")
+        
+    Returns:
+        subscriber_id if successful, None otherwise
+    """
     if not validate_contact(contact):
         return None
     
-    url = GET_OTP_URL
-
     querystring = {
         "contact": contact,
         "contactType": "SMS",
@@ -48,51 +111,74 @@ def get_otp(contact: str) -> str:
     }
     
     now = datetime.now(timezone(timedelta(hours=7)))
-    ax_request_at = java_like_timestamp(now)  # format: "2023-10-20T12:34:56.78+07:00"
+    ax_request_at = java_like_timestamp(now)
     ax_request_id = str(uuid.uuid4())
 
-    payload = ""
     headers = {
         "Accept-Encoding": "gzip, deflate, br",
         "Authorization": f"Basic {BASIC_AUTH}",
         "Ax-Device-Id": AX_DEVICE_ID,
         "Ax-Fingerprint": AX_FP,
         "Ax-Request-At": ax_request_at,
-        "Ax-Request-Device": "samsung",
-        "Ax-Request-Device-Model": "SM-N935F",
+        "Ax-Request-Device": DEVICE_NAME,
+        "Ax-Request-Device-Model": DEVICE_MODEL,
         "Ax-Request-Id": ax_request_id,
-        "Ax-Substype": "PREPAID",
+        "Ax-Substype": SUBSTYPE,
         "Content-Type": "application/json",
         "Host": BASE_CIAM_URL.replace("https://", ""),
         "User-Agent": UA,
     }
 
-    print("Requesting OTP...")
-    try:
-        response = requests.request("GET", url, data=payload, headers=headers, params=querystring, timeout=30)
-        print("response body", response.text)
-        json_body = json.loads(response.text)
-    
-        if "subscriber_id" not in json_body:
-            print(json_body.get("error", "No error message in response"))
-            raise ValueError("Subscriber ID not found in response")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True  # Membuat progress bar hilang setelah selesai
+    ) as progress:
+        task = progress.add_task("[cyan]Requesting OTP...", total=None)
         
-        return json_body["subscriber_id"]
-    except Exception as e:
-        print(f"Error requesting OTP: {e}")
-        return None
+        try:
+            response = requests.get(
+                GET_OTP_URL,
+                headers=headers,
+                params=querystring,
+                timeout=30
+            )
+            
+            json_body = json.loads(response.text)
+            
+            if "subscriber_id" not in json_body:
+                error_msg = json_body.get("error", "No error message in response")
+                log_error(f"OTP request failed: {error_msg}")
+                return None
+            
+            log_success("OTP sent successfully")
+            return json_body["subscriber_id"]
+            
+        except Exception as e:
+            log_error(f"Error requesting OTP: {e}")
+            return None
+
+
+def submit_otp(api_key: str, contact: str, code: str) -> Optional[Dict[str, Any]]:
+    """
+    Submit OTP code for authentication.
     
-def submit_otp(api_key: str, contact: str, code: str):
+    Args:
+        api_key: API key for signature
+        contact: Phone number
+        code: 6-digit OTP code
+        
+    Returns:
+        Token dictionary if successful, None otherwise
+    """
     if not validate_contact(contact):
-        print("Invalid number")
         return None
     
     if not code or len(code) != 6:
-        print("Invalid OTP code format")
+        log_error("Invalid OTP code format (must be 6 digits)")
         return None
     
-    url = SUBMIT_OTP_URL
-
     now_gmt7 = datetime.now(timezone(timedelta(hours=7)))
     ts_for_sign = ts_gmt7_without_colon(now_gmt7)
     ts_header = ts_gmt7_without_colon(now_gmt7 - timedelta(minutes=5))
@@ -107,32 +193,49 @@ def submit_otp(api_key: str, contact: str, code: str):
         "Ax-Device-Id": AX_DEVICE_ID,
         "Ax-Fingerprint": AX_FP,
         "Ax-Request-At": ts_header,
-        "Ax-Request-Device": "samsung",
-        "Ax-Request-Device-Model": "SM-N935F",
+        "Ax-Request-Device": DEVICE_NAME,
+        "Ax-Request-Device-Model": DEVICE_MODEL,
         "Ax-Request-Id": str(uuid.uuid4()),
-        "Ax-Substype": "PREPAID",
+        "Ax-Substype": SUBSTYPE,
         "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": UA,
     }
 
-    try:
-        response = requests.post(url, data=payload, headers=headers, timeout=30)
-        json_body = json.loads(response.text)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("[cyan]Verifying OTP...", total=None)
         
-        if "error" in json_body:
-            print(f"[Error submit_otp]: {json_body['error_description']}")
+        try:
+            response = requests.post(SUBMIT_OTP_URL, data=payload, headers=headers, timeout=30)
+            json_body = json.loads(response.text)
+            
+            if "error" in json_body:
+                log_error(f"Login failed: {json_body.get('error_description', 'Unknown error')}")
+                return None
+            
+            log_success("Login successful")
+            return json_body
+            
+        except requests.RequestException as e:
+            log_error(f"Request error: {e}")
             return None
+
+
+def get_new_token(refresh_token: str) -> Optional[Dict[str, Any]]:
+    """
+    Refresh access token using refresh token.
+    
+    Args:
+        refresh_token: Refresh token string
         
-        print("Login successful.")
-        return json_body
-    except requests.RequestException as e:
-        print(f"[Error submit_otp]: {e}")
-        return None
-
-def get_new_token(refresh_token: str) -> str:
-    url = SUBMIT_OTP_URL
-
-    now = datetime.now(timezone(timedelta(hours=7)))  # GMT+7
+    Returns:
+        New token dictionary if successful, None otherwise
+    """
+    now = datetime.now(timezone(timedelta(hours=7)))
     ax_request_at = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+0700"
     ax_request_id = str(uuid.uuid4())
 
@@ -141,12 +244,12 @@ def get_new_token(refresh_token: str) -> str:
         "ax-request-at": ax_request_at,
         "ax-device-id": AX_DEVICE_ID,
         "ax-request-id": ax_request_id,
-        "ax-request-device": "samsung",
-        "ax-request-device-model": "SM-N935F",
+        "ax-request-device": DEVICE_NAME,
+        "ax-request-device-model": DEVICE_MODEL,
         "ax-fingerprint": AX_FP,
         "authorization": f"Basic {BASIC_AUTH}",
         "user-agent": UA,
-        "ax-substype": "PREPAID",
+        "ax-substype": SUBSTYPE,
         "content-type": "application/x-www-form-urlencoded"
     }
 
@@ -155,30 +258,66 @@ def get_new_token(refresh_token: str) -> str:
         "refresh_token": refresh_token
     }
 
-    resp = requests.post(url, headers=headers, data=data, timeout=30)
-    if resp.status_code == 400:
-        if resp.json().get("error_description") == "Session not active":
-            print("Refresh token expired. Pleas remove and re-add the account.")
-            return None
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("[cyan]Refreshing token...", total=None)
         
-    resp.raise_for_status()
+        try:
+            resp = requests.post(SUBMIT_OTP_URL, headers=headers, data=data, timeout=30)
+            
+            if resp.status_code == 400:
+                error_data = resp.json()
+                if error_data.get("error_description") == "Session not active":
+                    log_error("Refresh token expired. Please remove and re-add the account.")
+                    return None
+            
+            resp.raise_for_status()
+            body = resp.json()
+            
+            if "id_token" not in body:
+                log_error("ID token not found in response")
+                return None
+                
+            if "error" in body:
+                log_error(f"Error: {body['error']} - {body.get('error_description', '')}")
+                return None
+            
+            log_success("Token refreshed successfully")
+            return body
+            
+        except Exception as e:
+            log_error(f"Error refreshing token: {e}")
+            return None
 
-    body = resp.json()
-    
-    if "id_token" not in body:
-        raise ValueError("ID token not found in response")
-    if "error" in body:
-        raise ValueError(f"Error in response: {body['error']} - {body.get('error_description', '')}")
-    
-    return body
+
+# ============================================================================
+# API REQUEST FUNCTIONS
+# ============================================================================
 
 def send_api_request(
     api_key: str,
     path: str,
-    payload_dict: dict,
+    payload_dict: Dict[str, Any],
     id_token: str,
     method: str = "POST",
-):
+) -> Any:
+    """
+    Send encrypted API request.
+    
+    Args:
+        api_key: API key for encryption
+        path: API endpoint path
+        payload_dict: Request payload dictionary
+        id_token: ID token for authorization
+        method: HTTP method (default: POST)
+        
+    Returns:
+        Decrypted response data
+    """
     encrypted_payload = encryptsign_xdata(
         api_key=api_key,
         method=method,
@@ -188,9 +327,8 @@ def send_api_request(
     )
     
     xtime = int(encrypted_payload["encrypted_body"]["xtime"])
-    
+    sig_time_sec = xtime // 1000
     now = datetime.now(timezone.utc).astimezone()
-    sig_time_sec = (xtime // 1000)
 
     body = encrypted_payload["encrypted_body"]
     x_sig = encrypted_payload["x_signature"]
@@ -206,134 +344,228 @@ def send_api_request(
         "x-signature": x_sig,
         "x-request-id": str(uuid.uuid4()),
         "x-request-at": java_like_timestamp(now),
-        "x-version-app": "8.8.0",
+        "x-version-app": APP_VERSION,
     }
-    
-    
 
     url = f"{BASE_API_URL}/{path}"
     resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=30)
-    
-    # print(f"Headers: {json.dumps(headers, indent=2)}")
-    # print(f"Response body: {resp.text}")
 
     try:
         decrypted_body = decrypt_xdata(api_key, json.loads(resp.text))
-        # print(f"Decrypted body: {json.dumps(decrypted_body, indent=2)}")
         return decrypted_body
     except Exception as e:
-        print("[decrypt err]", e)
+        log_error(f"Decryption error: {e}")
         return resp.text
 
-def get_profile(api_key: str, access_token: str, id_token: str) -> dict:
-    path = "api/v8/profile"
 
+# ============================================================================
+# PROFILE & BALANCE FUNCTIONS
+# ============================================================================
+
+def get_profile(api_key: str, access_token: str, id_token: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch user profile information.
+    
+    Args:
+        api_key: API key
+        access_token: Access token
+        id_token: ID token
+        
+    Returns:
+        Profile data dictionary or None
+    """
+    path = "api/v8/profile"
     raw_payload = {
         "access_token": access_token,
-        "app_version": "8.8.0",
+        "app_version": APP_VERSION,
         "is_enterprise": False,
         "lang": "en"
     }
 
-    print("Fetching profile...")
-    res = send_api_request(api_key, path, raw_payload, id_token, "POST")
-
-    return res.get("data")
-
-def get_balance(api_key: str, id_token: str) -> dict:
-    path = "api/v8/packages/balance-and-credit"
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("[cyan]Fetching profile...", total=None)
+        res = send_api_request(api_key, path, raw_payload, id_token, "POST")
+        
+    if res and "data" in res:
+        log_success("Profile fetched successfully")
+        return res.get("data")
     
+    log_error("Failed to fetch profile")
+    return None
+
+
+def get_balance(api_key: str, id_token: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch account balance information.
+    
+    Args:
+        api_key: API key
+        id_token: ID token
+        
+    Returns:
+        Balance data dictionary or None
+    """
+    path = "api/v8/packages/balance-and-credit"
     raw_payload = {
         "is_enterprise": False,
         "lang": "en"
     }
     
-    print("Fetching balance...")
-    res = send_api_request(api_key, path, raw_payload, id_token, "POST")
-    # print(f"[GB-256]:\n{json.dumps(res, indent=2)}")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("[cyan]Fetching balance...", total=None)
+        res = send_api_request(api_key, path, raw_payload, id_token, "POST")
     
-    if "data" in res:
-        if "balance" in res["data"]:
-            return res["data"]["balance"]
-    else:
-        print("Error getting balance:", res.get("error", "Unknown error"))
-        return None
+    if res and "data" in res and "balance" in res["data"]:
+        log_success("Balance fetched successfully")
+        return res["data"]["balance"]
+    
+    log_error(f"Error getting balance: {res.get('error', 'Unknown error')}")
+    return None
+
+
+def login_info(api_key: str, tokens: Dict[str, str], is_enterprise: bool = False) -> Optional[Dict[str, Any]]:
+    """
+    Get login information.
+    
+    Args:
+        api_key: API key
+        tokens: Token dictionary containing access_token and id_token
+        is_enterprise: Enterprise flag
+        
+    Returns:
+        Login data dictionary or None
+    """
+    path = "api/v8/auth/login"
+    raw_payload = {
+        "access_token": tokens["access_token"],
+        "is_enterprise": is_enterprise,
+        "lang": "en"
+    }
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("[cyan]Fetching login info...", total=None)
+        res = send_api_request(api_key, path, raw_payload, tokens["id_token"], "POST")
+    
+    if res and "data" in res:
+        log_success("Login info fetched successfully")
+        return res["data"]
+    
+    log_error(f"Error getting login info: {res.get('error', 'Unknown error')}")
+    return None
+
+
+# ============================================================================
+# PACKAGE FUNCTIONS
+# ============================================================================
 
 def get_family(
     api_key: str,
-    tokens: dict,
+    tokens: Dict[str, str],
     family_code: str,
-    is_enterprise: bool | None = None,
-    migration_type: str | None = None
-) -> dict:
-    print("Fetching package family...")
+    is_enterprise: Optional[bool] = None,
+    migration_type: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch package family information with parameter discovery.
     
-    is_enterprise_list = [
-        False,
-        True
-    ]
-
-    migration_type_list = [
-        "NONE",
-        "PRE_TO_PRIOH",
-        "PRIOH_TO_PRIO",
-        "PRIO_TO_PRIOH"
-    ]
-
-    if is_enterprise is not None:
-        is_enterprise_list = [is_enterprise]
-
-    if migration_type is not None:
-        migration_type_list = [migration_type]
+    Args:
+        api_key: API key
+        tokens: Token dictionary
+        family_code: Package family code
+        is_enterprise: Enterprise flag (None to try both)
+        migration_type: Migration type (None to try all)
+        
+    Returns:
+        Family data dictionary or None
+    """
+    log_info(f"Fetching package family: [yellow]{family_code}")
+    
+    is_enterprise_list = [False, True] if is_enterprise is None else [is_enterprise]
+    migration_type_list = ["NONE", "PRE_TO_PRIOH", "PRIOH_TO_PRIO", "PRIO_TO_PRIOH"] if migration_type is None else [migration_type]
 
     path = "api/v8/xl-stores/options/list"
     id_token = tokens.get("id_token")
-
     family_data = None
 
-    for mt in migration_type_list:
-        if family_data is not None:
-            break
-
-        for ie in is_enterprise_list:
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("[cyan]Discovering family parameters...", total=None)
+        
+        for mt in migration_type_list:
             if family_data is not None:
                 break
-        
-            print(f"Trying is_enterprise={ie}, migration_type={mt}.")
 
-            payload_dict = {
-                "is_show_tagging_tab": True,
-                "is_dedicated_event": True,
-                "is_transaction_routine": False,
-                "migration_type": mt,
-                "package_family_code": family_code,
-                "is_autobuy": False,
-                "is_enterprise": ie,
-                "is_pdlp": True,
-                "referral_code": "",
-                "is_migration": False,
-                "lang": "en"
-            }
-        
-            res = send_api_request(api_key, path, payload_dict, id_token, "POST")
-            # print(f"[get fam 320]:\n{json.dumps(res, indent=2)}")
-            if res.get("status") != "SUCCESS":
-                continue
+            for ie in is_enterprise_list:
+                if family_data is not None:
+                    break
             
-            family_name = res["data"]["package_family"].get("name", "")
-            if family_name != "":
-                family_data = res["data"]
-                print(f"Success with is_enterprise={ie}, migration_type={mt}. Family name: {family_name}")
+                progress.update(task, description=f"[cyan]Trying: enterprise={ie}, migration={mt}")
 
+                payload_dict = {
+                    "is_show_tagging_tab": True,
+                    "is_dedicated_event": True,
+                    "is_transaction_routine": False,
+                    "migration_type": mt,
+                    "package_family_code": family_code,
+                    "is_autobuy": False,
+                    "is_enterprise": ie,
+                    "is_pdlp": True,
+                    "referral_code": "",
+                    "is_migration": False,
+                    "lang": "en"
+                }
+            
+                res = send_api_request(api_key, path, payload_dict, id_token, "POST")
+                
+                if res.get("status") == "SUCCESS":
+                    family_name = res["data"]["package_family"].get("name", "")
+                    if family_name:
+                        family_data = res["data"]
+                        # Progress akan otomatis hilang karena context manager
 
-    if family_data is None:
-        print(f"Failed to get valid family data for {family_code}")
-        return None
+    if family_data:
+        log_success(f"Found family: [yellow]{family_data['package_family'].get('name', '')}")
+    else:
+        log_error(f"Failed to get valid family data for [red]{family_code}")
 
     return family_data
 
-def get_families(api_key: str, tokens: dict, package_category_code: str) -> dict:
-    print("Fetching families...")
+
+def get_families(
+    api_key: str,
+    tokens: Dict[str, str],
+    package_category_code: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch package families by category.
+    
+    Args:
+        api_key: API key
+        tokens: Token dictionary
+        package_category_code: Category code
+        
+    Returns:
+        Families data dictionary or None
+    """
     path = "api/v8/xl-stores/families"
     payload_dict = {
         "migration_type": "",
@@ -345,24 +577,46 @@ def get_families(api_key: str, tokens: dict, package_category_code: str) -> dict
         "lang": "en"
     }
     
-    res = send_api_request(api_key, path, payload_dict, tokens["id_token"], "POST")
-    if res.get("status") != "SUCCESS":
-        print(f"Failed to get families for category {package_category_code}")
-        print(f"Res:{res}")
-        # print(json.dumps(res, indent=2))
-        input("Press Enter to continue...")
-        return None
-    return res["data"]
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("[cyan]Fetching families...", total=None)
+        res = send_api_request(api_key, path, payload_dict, tokens["id_token"], "POST")
+    
+    if res.get("status") == "SUCCESS":
+        log_success(f"Families fetched for category: {package_category_code}")
+        return res["data"]
+    
+    log_error(f"Failed to get families for category {package_category_code}")
+    console.print(Panel(json.dumps(res, indent=2), title="Error Response", border_style="red"))
+    input("Press Enter to continue...")
+    return None
+
 
 def get_package(
     api_key: str,
-    tokens: dict,
+    tokens: Dict[str, str],
     package_option_code: str,
     package_family_code: str = "",
     package_variant_code: str = ""
-    ) -> dict:
-    path = "api/v8/xl-stores/options/detail"
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch package details by option code.
     
+    Args:
+        api_key: API key
+        tokens: Token dictionary
+        package_option_code: Package option code
+        package_family_code: Package family code (optional)
+        package_variant_code: Package variant code (optional)
+        
+    Returns:
+        Package data dictionary or None
+    """
+    path = "api/v8/xl-stores/options/detail"
     raw_payload = {
         "is_transaction_routine": False,
         "migration_type": "NONE",
@@ -378,114 +632,149 @@ def get_package(
         "package_variant_code": package_variant_code
     }
     
-    print("Fetching package...")
-    # print(f"Payload: {json.dumps(raw_payload, indent=2)}")
-    res = send_api_request(api_key, path, raw_payload, tokens["id_token"], "POST")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("[cyan]Fetching package details...", total=None)
+        res = send_api_request(api_key, path, raw_payload, tokens["id_token"], "POST")
     
-    if "data" not in res:
-        print(json.dumps(res, indent=2))
-        print("Error getting package:", res.get("error", "Unknown error"))
-        return None
-        
-    return res["data"]
+    if res and "data" in res:
+        log_success("Package details fetched successfully")
+        return res["data"]
+    
+    log_error(f"Error getting package: {res.get('error', 'Unknown error')}")
+    console.print(Panel(json.dumps(res, indent=2), title="Error Response", border_style="red"))
+    return None
 
-def get_addons(api_key: str, tokens: dict, package_option_code: str) -> dict:
-    path = "api/v8/xl-stores/options/addons-pinky-box"
+
+def get_addons(
+    api_key: str,
+    tokens: Dict[str, str],
+    package_option_code: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch available addons for a package.
     
+    Args:
+        api_key: API key
+        tokens: Token dictionary
+        package_option_code: Package option code
+        
+    Returns:
+        Addons data dictionary or None
+    """
+    path = "api/v8/xl-stores/options/addons-pinky-box"
     raw_payload = {
         "is_enterprise": False,
         "lang": "en",
         "package_option_code": package_option_code
     }
     
-    print("Fetching addons...")
-    res = send_api_request(api_key, path, raw_payload, tokens["id_token"], "POST")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("[cyan]Fetching addons...", total=None)
+        res = send_api_request(api_key, path, raw_payload, tokens["id_token"], "POST")
     
-    if "data" not in res:
-        print("Error getting addons:", res.get("error", "Unknown error"))
-        return None
-        
-    return res["data"]
+    if res and "data" in res:
+        log_success("Addons fetched successfully")
+        return res["data"]
+    
+    log_error(f"Error getting addons: {res.get('error', 'Unknown error')}")
+    return None
+
 
 def intercept_page(
     api_key: str,
-    tokens: dict,
+    tokens: Dict[str, str],
     option_code: str,
     is_enterprise: bool = False
-):
-    path = "misc/api/v8/utility/intercept-page"
+) -> None:
+    """
+    Fetch intercept page information.
     
+    Args:
+        api_key: API key
+        tokens: Token dictionary
+        option_code: Package option code
+        is_enterprise: Enterprise flag
+    """
+    path = "misc/api/v8/utility/intercept-page"
     raw_payload = {
         "is_enterprise": is_enterprise,
         "lang": "en",
         "package_option_code": option_code
     }
     
-    print("Fetching intercept page...")
-    res = send_api_request(api_key, path, raw_payload, tokens["id_token"], "POST")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("[cyan]Fetching intercept page...", total=None)
+        res = send_api_request(api_key, path, raw_payload, tokens["id_token"], "POST")
     
-    if "status" in res:
-        print(f"Intercept status: {res['status']}")
+    if res and "status" in res:
+        log_info(f"Intercept status: {res['status']}")
     else:
-        print("Intercept error")
+        log_error("Intercept error")
 
-def login_info(
-    api_key: str,
-    tokens: dict,
-    is_enterprise: bool = False
-):
-    path = "api/v8/auth/login"
-    
-    raw_payload = {
-        "access_token": tokens["access_token"],
-        "is_enterprise": is_enterprise,
-        "lang": "en"
-    }
-    
-    res = send_api_request(api_key, path, raw_payload, tokens["id_token"], "POST")
-    
-    if "data" not in res:
-        print(json.dumps(res, indent=2))
-        print("Error getting package:", res.get("error", "Unknown error"))
-        return None
-        
-    return res["data"]
 
 def get_package_details(
     api_key: str,
-    tokens: dict,
+    tokens: Dict[str, str],
     family_code: str,
     variant_code: str,
     option_order: int,
-    is_enterprise: bool | None = None,
-    migration_type: str | None = None
-) -> dict | None:
+    is_enterprise: Optional[bool] = None,
+    migration_type: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch complete package details by family, variant, and option order.
+    
+    Args:
+        api_key: API key
+        tokens: Token dictionary
+        family_code: Package family code
+        variant_code: Package variant code
+        option_order: Option order number
+        is_enterprise: Enterprise flag (None to auto-discover)
+        migration_type: Migration type (None to auto-discover)
+        
+    Returns:
+        Package details dictionary or None
+    """
     family_data = get_family(api_key, tokens, family_code, is_enterprise, migration_type)
     if not family_data:
-        print(f"Gagal mengambil data family untuk {family_code}.")
+        log_error(f"Failed to fetch family data for {family_code}")
         return None
-    
-    package_options = []
     
     package_variants = family_data["package_variants"]
     option_code = None
+    
     for variant in package_variants:
         if variant["package_variant_code"] == variant_code:
-            selected_variant = variant
-            package_options = selected_variant["package_options"]
+            package_options = variant["package_options"]
             for option in package_options:
                 if option["order"] == option_order:
-                    selected_option = option
-                    option_code = selected_option["package_option_code"]
+                    option_code = option["package_option_code"]
                     break
+            break
 
     if option_code is None:
-        print("Gagal menemukan opsi paket yang sesuai.")
+        log_error("Failed to find matching package option")
         return None
         
     package_details_data = get_package(api_key, tokens, option_code)
     if not package_details_data:
-        print("Gagal mengambil detail paket.")
+        log_error("Failed to fetch package details")
         return None
     
     return package_details_data

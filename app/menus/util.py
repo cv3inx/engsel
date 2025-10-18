@@ -1,81 +1,54 @@
-import app.menus.banner as banner
-from html.parser import HTMLParser
 import os
 import re
-import textwrap
 import json
-import urllib.request
-import urllib.error
+import textwrap
+from typing import List, Dict, Optional, Any
+from html.parser import HTMLParser
 
-WIDTH = 55
+import requests
+from rich.console import Console
+from rich.text import Text
+from rich.align import Align
+from rich.panel import Panel
+from rich import box
+from rich.spinner import Spinner
+from rich.live import Live
 
+from app.util import getScreen, NOTIF_URL  # Pastikan ada di app/util.py
+
+# --- Konfigurasi Global ---
+WIDTH = getScreen()
+console: Console = Console(width=WIDTH)
+
+# --- Kelas Style (opsional) ---
 class Style:
     RED = '\033[91m'
     GREEN = '\033[92m'
     YELLOW = '\033[93m'
     CYAN = '\033[96m'
     MAGENTA = '\033[95m'
+    BLUE = '\033[94m'
+    WHITE = '\033[97m'
     RESET = '\033[0m'
 
-def clear_screen():
-    os.system('cls' if os.name == 'nt' else 'clear')
-    width = WIDTH
-    print("=" * width)
-    print(f" Special Thx for Baka Mitai 😘".center(width))
-    print("=" * width)
-    print("")
-    # Load notification from remote JSON; show only if present
-    notif_url = "https://pastebin.com/raw/2UfYSacE"
-    notifications = load_notifications(notif_url)
-    for notif in notifications:
-        text = notif.get('text')
-        color = notif.get('color')
-        if text:
-            wrapped_text = textwrap.wrap(text, width=width)
-            if color:
-                style_code = getattr(Style, color.upper(), "")
-                reset_code = Style.RESET if style_code else ""
-                for line in wrapped_text:
-                    print(f"{style_code}{line.center(width)}{reset_code}")
-            else:
-                for line in wrapped_text:
-                    print(line.center(width))
-    print("")
-
-def print_header(title):
-    clear_screen()
-    print(title.center(WIDTH))
-    print("=" * WIDTH)
-        
-
-def pause():
-    input("\nPress enter to continue...")
-
-def format_quota(byte_val: int) -> str:
-    if byte_val is None:
-        return "N/A"
-    power = 1024
-    n = 0
-    power_labels = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
-    while byte_val >= power and n < len(power_labels):
-        byte_val /= power
-        n += 1
-    return f"{byte_val:.2f} {power_labels[n]}"
-
+# --- HTML to Text Parser ---
 class HTMLToText(HTMLParser):
-    def __init__(self, width=80):
+    """
+    Parser sederhana untuk mengonversi HTML ke teks biasa.
+    """
+    def __init__(self, width: int = 80):
         super().__init__()
-        self.width = width
-        self.result = []
-        self.in_li = False
+        self.width: int = width
+        self.result: List[str] = []
+        self.in_li: bool = False
 
-    def handle_starttag(self, tag, attrs):
+    def handle_starttag(self, tag: str, attrs):
         if tag == "li":
             self.in_li = True
         elif tag == "br":
             self.result.append("\n")
 
-    def handle_endtag(self, tag):
+    def handle_endtag(self, tag: str):
         if tag == "li":
             self.in_li = False
             self.result.append("\n")
@@ -83,97 +56,113 @@ class HTMLToText(HTMLParser):
     def handle_data(self, data):
         text = data.strip()
         if text:
-            if self.in_li:
-                self.result.append(f"- {text}")
-            else:
-                self.result.append(text)
+            prefix = "- " if self.in_li else ""
+            self.result.append(f"{prefix}{text}")
 
-    def get_text(self):
-        # Join and clean multiple newlines
+    def get_text(self) -> str:
         text = "".join(self.result)
         text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
-        # Wrap lines nicely
         return "\n".join(textwrap.wrap(text, width=self.width, replace_whitespace=False))
 
-def display_html(html_text, width=80):
+def display_html(html_text: str, width: int = 80) -> str:
+    """
+    Konversi string HTML ke teks biasa dengan format dasar.
+    """
     parser = HTMLToText(width=width)
     parser.feed(html_text)
     return parser.get_text()
 
-def wrap_text(text, width=WIDTH):
-    """Wraps text to the given width, preserving existing newlines."""
-    lines = text.split('\n')
-    wrapped_lines = []
-    for line in lines:
-        wrapped_lines.extend(textwrap.wrap(line, width=width))
-    return '\n'.join(wrapped_lines)
-
-def load_notifications(url):
-    """Fetch notification JSON from url and return a list of dicts.
-    It can handle a single notification object, a list of notification objects,
-    or multiple notification objects as separate keys in the JSON.
+# --- Fungsi Utilitas Umum ---
+def clear_screen():
     """
-    def _find_notif_objects(data):
-        if not isinstance(data, dict):
-            return []
+    Bersihkan layar dan tampilkan header dengan notifikasi opsional.
+    """
+    os.system('cls' if os.name == 'nt' else 'clear')
 
-        # Check for a primary 'notifikasi' key which could be a list or a dict
-        primary_notif = data.get('notifikasi')
-        if primary_notif:
-            if isinstance(primary_notif, list):
-                return primary_notif  # It's a list of notifs
-            if isinstance(primary_notif, dict):
-                return [primary_notif] # It's a single notif
+    header_text = Text("Special Thx for Baka Mitai 😘", style="bold magenta")
+    console.print(Align.center(header_text, width=WIDTH))
+    console.print("=" * WIDTH)
 
-        # If no primary 'notifikasi' key, look for 'notifik...', etc.
-        notifs = []
-        for key, value in sorted(data.items()): # sort to get notif1, notif2 in order
-            if key.lower().startswith('notifik') and isinstance(value, dict):
-                notifs.append(value)
-        
-        return notifs
+    notif = load_notifications(NOTIF_URL)
+    if notif:
+        pesan_val = notif.get("pesan", "").strip()
+        full_text = pesan_val if pesan_val and pesan_val != "-" else Align.center("Tidak ada notifikasi terbaru", width=WIDTH)
 
-    def _extract_text_and_color(obj):
-        if not isinstance(obj, dict):
-            return None, None
-        # 1) text can be a string
-        text_field = obj.get('text')
-        if isinstance(text_field, str):
-            return text_field, obj.get('color')
-        # 2) text can be a dict of language variants
-        if isinstance(text_field, dict):
-            # prefer 'prassa'
-            lang_text = text_field.get('prassa')
-            if isinstance(lang_text, str):
-                return lang_text, obj.get('color')
-            # fallback to any first available string
-            for v in text_field.values():
-                if isinstance(v, str):
-                    return v, obj.get('color')
-        # 3) direct 'prassa' key (string or nested dict)
-        pr = obj.get('prassa')
-        if isinstance(pr, str):
-            return pr, obj.get('color')
-        if isinstance(pr, dict):
-            # prassa may itself contain text and color
-            if isinstance(pr.get('text'), str):
-                return pr.get('text'), pr.get('color') or obj.get('color')
-        return None, obj.get('color')
+        panel = Panel(
+            full_text,
+            title=f"[ {notif.get('type', 'N/A')} ]",
+            title_align="center",
+            subtitle=f"[ {notif.get('footer', 'N/A')} ]",
+            subtitle_align="center",
+            box=box.ROUNDED,
+            style="blue",
+            width=WIDTH,
+        )
+        console.print(panel)
 
-    notifications = []
-    try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            if getattr(resp, "status", 200) != 200:
-                return []
-            body = resp.read().decode('utf-8')
-            data = json.loads(body)
-            
-            notif_objects = _find_notif_objects(data)
+    console.print()
 
-            for obj in notif_objects:
-                text, color = _extract_text_and_color(obj)
-                if text:
-                    notifications.append({'text': text, 'color': color})
-            return notifications
-    except Exception:
-        return []
+def print_header(title: str):
+    """
+    Cetak header rapi terpusat dengan pemisah.
+    """
+    clear_screen()
+    console.print(Align.center(f"[bold]{title}[/]", width=WIDTH))
+    console.print("=" * WIDTH)
+
+def pause():
+    """
+    Jeda eksekusi dan tunggu input pengguna.
+    """
+    console.input("\n[bold yellow]Press Enter to continue...[/]")
+
+def format_quota(byte_val: Optional[int]) -> str:
+    """
+    Format nilai byte menjadi string mudah dibaca (B, KB, MB, dll.).
+    """
+    if byte_val is None:
+        return "N/A"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(byte_val)
+    unit_index = 0
+    while size >= 1024 and unit_index < len(units) - 1:
+        size /= 1024.0
+        unit_index += 1
+    return f"{size:.2f} {units[unit_index]}"
+
+def wrap_text(text: str, width: int = WIDTH) -> str:
+    """
+    Bungkus teks sesuai lebar, tetap pertahankan baris baru.
+    """
+    lines = text.split('\n')
+    wrapped = []
+    for line in lines:
+        if line.strip():
+            wrapped.extend(textwrap.wrap(line, width=width))
+        else:
+            wrapped.append("")
+    return "\n".join(wrapped)
+
+def load_notifications(url: str) -> Dict[str, Any]:
+    """
+    Ambil dan parsing notifikasi JSON dari URL remote.
+    Format JSON: {"type": "...", "pesan": "...", "footer": "..."}
+    """
+    spinner = Spinner("dots", text="Loading notifications...")
+    with Live(spinner, refresh_per_second=12, transient=True):
+        try:
+            response = requests.get(url.strip(), timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            if not data:
+                console.log("[dim]Tidak ada notifikasi valid ditemukan.[/dim]")
+            return data
+        except requests.exceptions.RequestException as e:
+            console.log(f"[red]Gagal mengambil notifikasi (Request Error): {e}[/red]")
+            return {}
+        except json.JSONDecodeError:
+            console.log("[red]Gagal mem-parsing JSON dari notifikasi.[/red]")
+            return {}
+        except Exception as e:
+            console.log(f"[red]Gagal mengambil notifikasi (Error tak terduga): {e}[/red]")
+            return {}

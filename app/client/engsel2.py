@@ -100,10 +100,8 @@ def get_tiering_info(api_key: str, tokens: dict) -> dict:
     # "status": "SUCCESS"
     # }
 
-    print("Fetching tiering info...")
     res = send_api_request(api_key, path, raw_payload, tokens["id_token"], "POST")
     # print(json.dumps(res, indent=4))
-    
     if res:
         return res.get("data", {})
     return {}
