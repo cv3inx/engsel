@@ -152,7 +152,7 @@ def show_package_details(api_key, tokens, package_option_code, is_enterprise, op
         
         if choice == "00":
             return False
-        
+        1
         if choice == "0" and option_order != -1:
             success = BookmarkInstance.add_bookmark(
                 family_code=package.get("package_family", {}).get("package_family_code", ""),
